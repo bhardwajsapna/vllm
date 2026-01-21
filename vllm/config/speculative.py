@@ -47,6 +47,7 @@ SpeculativeMethod = Literal[
     "medusa",
     "mlp_speculator",
     "draft_model",
+    "dflash",
     "suffix",
     EagleModelTypes,
 ]
@@ -151,6 +152,21 @@ class SpeculativeConfig:
     """The minimum token probability for suffix decoding. Will only speculate
     tokens with estimated probability (based on frequency counts) greater than
     or equal to this value."""
+
+    # DFlash proposer configuration
+    dflash_block_size: int = 16
+    """Draft block size for parallel denoising in DFlash speculative decoding.
+    This determines how many tokens are generated in parallel per denoising
+    step."""
+
+    dflash_num_denoising_steps: int = 3
+    """Number of iterative refinement (denoising) steps for DFlash speculative
+    decoding. More steps can improve quality but increase latency."""
+
+    dflash_mask_token_id: int | None = None
+    """The token ID used as the mask token for DFlash denoising. If None, it
+    will be auto-detected from the tokenizer (looking for <|MASK|> or
+    <mask> tokens)."""
 
     def compute_hash(self) -> str:
         """
@@ -376,6 +392,10 @@ class SpeculativeConfig:
                     self.method = "eagle"
                 elif "eagle3" in self.draft_model_config.model.lower():
                     self.method = "eagle3"
+                elif self.draft_model_config.hf_config.model_type == "dflash" or (
+                    "dflash" in self.draft_model_config.model.lower()
+                ):
+                    self.method = "dflash"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
                     self.method = "medusa"
                 elif self.draft_model_config.hf_config.model_type == "mlp_speculator":
@@ -698,6 +718,9 @@ class SpeculativeConfig:
 
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "mtp")
+
+    def use_dflash(self) -> bool:
+        return self.method == "dflash"
 
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"

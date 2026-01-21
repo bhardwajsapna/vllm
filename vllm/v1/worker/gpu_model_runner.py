@@ -144,6 +144,7 @@ from vllm.v1.sample.logits_processor.interface import LogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
+from vllm.v1.spec_decode.dflash import DFlashProposer
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
@@ -437,6 +438,7 @@ class GPUModelRunner(
                 | EagleProposer
                 | DraftModelProposer
                 | MedusaProposer
+                | DFlashProposer
             )
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
@@ -454,6 +456,10 @@ class GPUModelRunner(
                     self.use_aux_hidden_state_outputs = (
                         self.drafter.eagle3_use_aux_hidden_state
                     )
+            elif self.speculative_config.use_dflash():
+                self.drafter = DFlashProposer(
+                    vllm_config=self.vllm_config, device=self.device
+                )
             elif self.speculative_config.method == "medusa":
                 self.drafter = MedusaProposer(
                     vllm_config=self.vllm_config, device=self.device
@@ -3675,6 +3681,30 @@ class GPUModelRunner(
                 offset = 0
                 assert spec_decode_metadata is not None, (
                     "No spec decode metadata for medusa"
+                )
+                for num_draft, tokens in zip(
+                    spec_decode_metadata.num_draft_tokens, sampled_token_ids
+                ):
+                    indices.append(offset + len(tokens) - 1)
+                    offset += num_draft + 1
+                indices = torch.tensor(indices, device=self.device)
+                hidden_states = sample_hidden_states[indices]
+
+            draft_token_ids = self.drafter.propose(
+                target_hidden_states=hidden_states,
+                sampling_metadata=sampling_metadata,
+            )
+        elif spec_config.use_dflash():
+            assert isinstance(sampled_token_ids, list)
+            assert isinstance(self.drafter, DFlashProposer)
+
+            if sample_hidden_states.shape[0] == len(sampled_token_ids):
+                hidden_states = sample_hidden_states
+            else:
+                indices = []
+                offset = 0
+                assert spec_decode_metadata is not None, (
+                    "No spec decode metadata for dflash"
                 )
                 for num_draft, tokens in zip(
                     spec_decode_metadata.num_draft_tokens, sampled_token_ids
