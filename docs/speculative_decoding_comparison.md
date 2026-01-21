@@ -251,10 +251,54 @@ speculative_config = {
 - `num_diffusion_steps`: Denoising iterations (default: 8)
 - `noise_schedule`: "cosine", "linear", or "sqrt"
 
+**Reproducibility Features:**
+- Optional `seed` parameter for deterministic draft token generation
+- Built-in statistics tracking for monitoring and debugging
+
+**Statistics Tracking:**
+```python
+from vllm.model_executor.models.dflash import get_dflash_stats, reset_dflash_stats
+
+# Get current statistics
+stats = get_dflash_stats()
+print(stats)
+
+# Example output:
+# DFlash Statistics:
+#   Calls: 100 total (80 seeded, 20 unseeded)
+#   Input tokens: 51200
+#   Draft tokens generated: 800
+#   Batch sizes: min=2, max=16, avg=5.12
+#   Unique seeds used: 45
+#   Reproducibility rate: 80.0%
+#   Timing (ms): min=8.30, max=52.10, avg=20.39, total=2039.00
+
+# Get as dictionary
+summary = stats.get_summary()
+
+# Reset statistics
+reset_dflash_stats()
+```
+
+**Tracked Metrics:**
+| Metric | Description |
+|--------|-------------|
+| `total_calls` | Number of draft generation calls |
+| `total_input_tokens` | Total input tokens processed |
+| `total_draft_tokens_generated` | Total draft tokens generated |
+| `seeded_calls` | Reproducible calls (with seed) |
+| `unseeded_calls` | Non-reproducible calls |
+| `reproducibility_rate` | Percentage of seeded calls |
+| `unique_seeds_count` | Number of unique seeds used |
+| `min/max/avg_batch_size` | Batch size statistics |
+| `min/max/avg/total_time_ms` | Timing statistics |
+
 **Pros:**
 - Parallel block generation
 - Novel diffusion-based approach
 - Can share embeddings with target model
+- Built-in reproducibility with seed parameter
+- Comprehensive statistics tracking
 
 **Cons:**
 - Newer method with limited testing
@@ -298,17 +342,19 @@ speculative_config = {
 
 ## Performance Comparison Matrix
 
-| Method | Memory | Latency | Throughput Gain | Setup Complexity |
-|--------|--------|---------|-----------------|------------------|
-| N-gram | Low | Low | Low-Medium | Very Easy |
-| Medusa | Medium | Low | Medium-High | Medium |
-| EAGLE | Medium-High | Low | High | Medium |
-| EAGLE3 | Medium-High | Low | Very High | Medium |
-| MTP | Low | Very Low | Medium | Easy (if supported) |
-| MLP Speculator | Low | Very Low | Medium | Easy |
-| Suffix | Low-Medium | Medium | Variable | Easy |
-| DFlash | Medium | Medium | TBD | Medium |
-| Draft Model | High | High | Medium | Complex |
+| Method | Memory | Latency | Throughput Gain | Setup Complexity | Stats Tracking |
+|--------|--------|---------|-----------------|------------------|----------------|
+| N-gram | Low | Low | Low-Medium | Very Easy | No |
+| Medusa | Medium | Low | Medium-High | Medium | No |
+| EAGLE | Medium-High | Low | High | Medium | No |
+| EAGLE3 | Medium-High | Low | Very High | Medium | No |
+| MTP | Low | Very Low | Medium | Easy (if supported) | No |
+| MLP Speculator | Low | Very Low | Medium | Easy | No |
+| Suffix | Low-Medium | Medium | Variable | Easy | No |
+| DFlash | Medium | Medium | TBD | Medium | **Yes** |
+| Draft Model | High | High | Medium | Complex | No |
+
+> **Note:** DFlash is the only method with built-in statistics tracking for reproducibility monitoring, including call counts, token statistics, timing, and seed tracking.
 
 ---
 
