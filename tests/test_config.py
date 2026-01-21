@@ -4,7 +4,7 @@
 import logging
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import pytest
 from pydantic import ValidationError
@@ -28,6 +28,29 @@ from vllm.config.vllm import (
     OptimizationLevel,
 )
 from vllm.platforms import current_platform
+
+
+def _is_hf_token_available():
+    """Check if HuggingFace token is available for gated model access."""
+    try:
+        from huggingface_hub import HfFolder
+        token = HfFolder.get_token()
+        return token is not None
+    except Exception:
+        return False
+
+
+# Skip marker for tests requiring gated model access
+requires_hf_token = pytest.mark.skipif(
+    not _is_hf_token_available(),
+    reason="HuggingFace token not available for gated model access"
+)
+
+# Skip marker for tests requiring GPU/CUDA
+requires_gpu = pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="Test requires CUDA GPU"
+)
 
 
 def test_compile_config_repr_succeeds():
@@ -254,6 +277,7 @@ def test_get_bert_tokenization_sentence_transformer_config():
     assert bert_bge_model_config["do_lower_case"]
 
 
+@requires_hf_token
 def test_rope_customization():
     TEST_ROPE_PARAMETERS = {
         "rope_theta": 16_000_000.0,
@@ -340,7 +364,14 @@ def test_nested_hf_overrides():
     [
         ("facebook/opt-125m", False),
         ("openai/whisper-tiny", True),
-        ("meta-llama/Llama-3.2-1B-Instruct", False),
+        pytest.param(
+            "meta-llama/Llama-3.2-1B-Instruct",
+            False,
+            marks=pytest.mark.skipif(
+                not _is_hf_token_available(),
+                reason="HuggingFace token not available for gated model access"
+            ),
+        ),
     ],
 )
 def test_is_encoder_decoder(model_id, is_encoder_decoder):
@@ -848,38 +879,60 @@ def test_vllm_config_defaults_are_none():
             OptimizationLevel.O0,
         ),
         (None, CompilationConfig(), OptimizationLevel.O0),
-        (None, CompilationConfig(), OptimizationLevel.O1),
-        (None, CompilationConfig(), OptimizationLevel.O2),
-        (None, CompilationConfig(), OptimizationLevel.O3),
-        (
+        pytest.param(
+            None, CompilationConfig(), OptimizationLevel.O1,
+            marks=requires_gpu,
+        ),
+        pytest.param(
+            None, CompilationConfig(), OptimizationLevel.O2,
+            marks=requires_gpu,
+        ),
+        pytest.param(
+            None, CompilationConfig(), OptimizationLevel.O3,
+            marks=requires_gpu,
+        ),
+        pytest.param(
             "RedHatAI/Qwen3-8B-speculator.eagle3",
             CompilationConfig(backend="inductor", custom_ops=["+quant_fp8"]),
             OptimizationLevel.O2,
+            marks=requires_gpu,
         ),
         (
             "RedHatAI/Qwen3-8B-speculator.eagle3",
             CompilationConfig(),
             OptimizationLevel.O0,
         ),
-        (
+        pytest.param(
             "RedHatAI/Qwen3-8B-speculator.eagle3",
             CompilationConfig(),
             OptimizationLevel.O1,
+            marks=requires_gpu,
         ),
-        (
+        pytest.param(
             "RedHatAI/Qwen3-8B-speculator.eagle3",
             CompilationConfig(),
             OptimizationLevel.O2,
+            marks=requires_gpu,
         ),
-        (
+        pytest.param(
             "RedHatAI/Qwen3-8B-speculator.eagle3",
             CompilationConfig(),
             OptimizationLevel.O3,
+            marks=requires_gpu,
         ),
         ("RedHatAI/DeepSeek-V2.5-1210-FP8", CompilationConfig(), OptimizationLevel.O0),
-        ("RedHatAI/DeepSeek-V2.5-1210-FP8", CompilationConfig(), OptimizationLevel.O1),
-        ("RedHatAI/DeepSeek-V2.5-1210-FP8", CompilationConfig(), OptimizationLevel.O2),
-        ("RedHatAI/DeepSeek-V2.5-1210-FP8", CompilationConfig(), OptimizationLevel.O3),
+        pytest.param(
+            "RedHatAI/DeepSeek-V2.5-1210-FP8", CompilationConfig(), OptimizationLevel.O1,
+            marks=requires_gpu,
+        ),
+        pytest.param(
+            "RedHatAI/DeepSeek-V2.5-1210-FP8", CompilationConfig(), OptimizationLevel.O2,
+            marks=requires_gpu,
+        ),
+        pytest.param(
+            "RedHatAI/DeepSeek-V2.5-1210-FP8", CompilationConfig(), OptimizationLevel.O3,
+            marks=requires_gpu,
+        ),
     ],
 )
 def test_vllm_config_defaults(model_id, compiliation_config, optimization_level):
@@ -956,6 +1009,7 @@ def test_vllm_config_callable_defaults():
     assert enable_if_sequential(config_quantized) is True
 
 
+@requires_gpu
 def test_vllm_config_explicit_overrides():
     """Test that explicit property overrides work correctly with callable defaults.
 
@@ -1109,6 +1163,7 @@ def test_needs_dp_coordination(
     assert vllm_config.needs_dp_coordinator == expected_needs_coordinator
 
 
+@requires_hf_token
 def test_eagle_draft_model_config():
     """Test that EagleDraft model config is correctly set."""
     target_model_config = ModelConfig(
