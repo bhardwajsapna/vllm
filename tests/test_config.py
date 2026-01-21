@@ -4,10 +4,12 @@
 import logging
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, PropertyMock
+from contextlib import contextmanager
 
 import pytest
 from pydantic import ValidationError
+from transformers import PretrainedConfig
 
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
@@ -30,6 +32,93 @@ from vllm.config.vllm import (
 from vllm.platforms import current_platform
 
 
+# ============================================================================
+# Mock HuggingFace Configs for Gated Models
+# ============================================================================
+
+class MockLlama3Config(PretrainedConfig):
+    """Mock config for meta-llama/Meta-Llama-3-8B-Instruct"""
+    model_type = "llama"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.architectures = ["LlamaForCausalLM"]
+        self.hidden_size = 4096
+        self.intermediate_size = 14336
+        self.num_hidden_layers = 32
+        self.num_attention_heads = 32
+        self.num_key_value_heads = 8
+        self.vocab_size = 128256
+        self.max_position_embeddings = 8192
+        self.rope_theta = 500000.0
+        self.rope_scaling = None
+        self.rms_norm_eps = 1e-5
+        self.tie_word_embeddings = False
+        self.rope_parameters = {"rope_theta": 500000.0, "rope_type": "default"}
+        self.is_encoder_decoder = False
+
+
+class MockLlama32Config(PretrainedConfig):
+    """Mock config for meta-llama/Llama-3.2-1B-Instruct"""
+    model_type = "llama"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.architectures = ["LlamaForCausalLM"]
+        self.hidden_size = 2048
+        self.intermediate_size = 8192
+        self.num_hidden_layers = 16
+        self.num_attention_heads = 32
+        self.num_key_value_heads = 8
+        self.vocab_size = 128256
+        self.max_position_embeddings = 131072
+        self.rope_theta = 500000.0
+        self.rms_norm_eps = 1e-5
+        self.tie_word_embeddings = True
+        self.is_encoder_decoder = False
+
+
+class MockUnderlyingLlamaConfig:
+    """Mock underlying model config for EAGLE wrapper."""
+    model_type = "llama"
+
+
+class MockEagleLlamaConfig(PretrainedConfig):
+    """Mock config for yuhuili/EAGLE-LLaMA3-Instruct-8B"""
+    model_type = "eagle"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.architectures = ["EagleLlamaForCausalLM"]
+        self.hidden_size = 4096
+        self.intermediate_size = 14336
+        self.num_hidden_layers = 1
+        self.num_attention_heads = 32
+        self.num_key_value_heads = 8
+        self.vocab_size = 128256
+        self.max_position_embeddings = 8192
+        self.rms_norm_eps = 1e-5
+        self.tie_word_embeddings = False
+        self.eagle = {"fc_bias": True}
+        self.head_dim = self.hidden_size // self.num_attention_heads
+        self.rope_theta = 500000.0
+        self.rope_scaling = None
+        self.is_encoder_decoder = False
+        # For DeepSeek MLA check
+        self.kv_lora_rank = None
+        self.qk_rope_head_dim = None
+        # Underlying model config (for EAGLE wrapper)
+        self.model = MockUnderlyingLlamaConfig()
+
+
+# Mapping of gated model names to their mock configs
+MOCK_GATED_CONFIGS = {
+    "meta-llama/Meta-Llama-3-8B-Instruct": MockLlama3Config,
+    "meta-llama/Llama-3.2-1B-Instruct": MockLlama32Config,
+    "yuhuili/EAGLE-LLaMA3-Instruct-8B": MockEagleLlamaConfig,
+}
+
+
 def _is_hf_token_available():
     """Check if HuggingFace token is available for gated model access."""
     try:
@@ -40,17 +129,95 @@ def _is_hf_token_available():
         return False
 
 
-# Skip marker for tests requiring gated model access
-requires_hf_token = pytest.mark.skipif(
-    not _is_hf_token_available(),
-    reason="HuggingFace token not available for gated model access"
-)
+@pytest.fixture
+def mock_gated_models(monkeypatch):
+    """Fixture to mock gated model config loading."""
+    from vllm.transformers_utils import config as vllm_config_module
 
-# Skip marker for tests requiring GPU/CUDA
-requires_gpu = pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="Test requires CUDA GPU"
-)
+    original_get_config = vllm_config_module.get_config
+
+    def patched_get_config(
+        model,
+        trust_remote_code=False,
+        revision=None,
+        code_revision=None,
+        config_format="auto",
+        hf_overrides_kw=None,
+        hf_overrides_fn=None,
+        **kwargs
+    ):
+        model_str = str(model)
+        if model_str in MOCK_GATED_CONFIGS:
+            mock_config = MOCK_GATED_CONFIGS[model_str]()
+            # Apply hf_overrides if provided
+            if hf_overrides_kw:
+                for key, value in hf_overrides_kw.items():
+                    setattr(mock_config, key, value)
+            if hf_overrides_fn:
+                mock_config = hf_overrides_fn(mock_config)
+            return mock_config
+        return original_get_config(
+            model,
+            trust_remote_code=trust_remote_code,
+            revision=revision,
+            code_revision=code_revision,
+            config_format=config_format,
+            hf_overrides_kw=hf_overrides_kw,
+            hf_overrides_fn=hf_overrides_fn,
+            **kwargs
+        )
+
+    monkeypatch.setattr(vllm_config_module, 'get_config', patched_get_config)
+    # Also patch in vllm.config.model where it's imported
+    monkeypatch.setattr('vllm.config.model.get_config', patched_get_config)
+
+
+@pytest.fixture
+def mock_cuda_platform(monkeypatch):
+    """Fixture to mock CUDA platform for GPU-dependent tests."""
+    monkeypatch.setattr(current_platform, 'is_cuda', lambda: True)
+
+
+@contextmanager
+def mock_gated_config_context():
+    """Context manager version for inline use."""
+    from vllm.transformers_utils import config as vllm_config_module
+
+    original_get_config = vllm_config_module.get_config
+
+    def patched_get_config(
+        model,
+        trust_remote_code=False,
+        revision=None,
+        code_revision=None,
+        config_format="auto",
+        hf_overrides_kw=None,
+        hf_overrides_fn=None,
+        **kwargs
+    ):
+        model_str = str(model)
+        if model_str in MOCK_GATED_CONFIGS:
+            mock_config = MOCK_GATED_CONFIGS[model_str]()
+            if hf_overrides_kw:
+                for key, value in hf_overrides_kw.items():
+                    setattr(mock_config, key, value)
+            if hf_overrides_fn:
+                mock_config = hf_overrides_fn(mock_config)
+            return mock_config
+        return original_get_config(
+            model,
+            trust_remote_code=trust_remote_code,
+            revision=revision,
+            code_revision=code_revision,
+            config_format=config_format,
+            hf_overrides_kw=hf_overrides_kw,
+            hf_overrides_fn=hf_overrides_fn,
+            **kwargs
+        )
+
+    with patch.object(vllm_config_module, 'get_config', patched_get_config):
+        with patch('vllm.config.model.get_config', patched_get_config):
+            yield
 
 
 def test_compile_config_repr_succeeds():
@@ -277,8 +444,7 @@ def test_get_bert_tokenization_sentence_transformer_config():
     assert bert_bge_model_config["do_lower_case"]
 
 
-@requires_hf_token
-def test_rope_customization():
+def test_rope_customization(mock_gated_models):
     TEST_ROPE_PARAMETERS = {
         "rope_theta": 16_000_000.0,
         "rope_type": "dynamic",
@@ -364,17 +530,10 @@ def test_nested_hf_overrides():
     [
         ("facebook/opt-125m", False),
         ("openai/whisper-tiny", True),
-        pytest.param(
-            "meta-llama/Llama-3.2-1B-Instruct",
-            False,
-            marks=pytest.mark.skipif(
-                not _is_hf_token_available(),
-                reason="HuggingFace token not available for gated model access"
-            ),
-        ),
+        ("meta-llama/Llama-3.2-1B-Instruct", False),
     ],
 )
-def test_is_encoder_decoder(model_id, is_encoder_decoder):
+def test_is_encoder_decoder(model_id, is_encoder_decoder, mock_gated_models):
     config = ModelConfig(model_id)
 
     assert config.is_encoder_decoder == is_encoder_decoder
@@ -870,6 +1029,13 @@ def test_vllm_config_defaults_are_none():
                 assert getattr(config.compilation_config, k) is None
 
 
+# Skip marker for tests requiring GPU/CUDA
+requires_gpu = pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="Test requires CUDA GPU for compilation config"
+)
+
+
 @pytest.mark.parametrize(
     ("model_id", "compiliation_config", "optimization_level"),
     [
@@ -879,18 +1045,9 @@ def test_vllm_config_defaults_are_none():
             OptimizationLevel.O0,
         ),
         (None, CompilationConfig(), OptimizationLevel.O0),
-        pytest.param(
-            None, CompilationConfig(), OptimizationLevel.O1,
-            marks=requires_gpu,
-        ),
-        pytest.param(
-            None, CompilationConfig(), OptimizationLevel.O2,
-            marks=requires_gpu,
-        ),
-        pytest.param(
-            None, CompilationConfig(), OptimizationLevel.O3,
-            marks=requires_gpu,
-        ),
+        pytest.param(None, CompilationConfig(), OptimizationLevel.O1, marks=requires_gpu),
+        pytest.param(None, CompilationConfig(), OptimizationLevel.O2, marks=requires_gpu),
+        pytest.param(None, CompilationConfig(), OptimizationLevel.O3, marks=requires_gpu),
         pytest.param(
             "RedHatAI/Qwen3-8B-speculator.eagle3",
             CompilationConfig(backend="inductor", custom_ops=["+quant_fp8"]),
@@ -922,15 +1079,21 @@ def test_vllm_config_defaults_are_none():
         ),
         ("RedHatAI/DeepSeek-V2.5-1210-FP8", CompilationConfig(), OptimizationLevel.O0),
         pytest.param(
-            "RedHatAI/DeepSeek-V2.5-1210-FP8", CompilationConfig(), OptimizationLevel.O1,
+            "RedHatAI/DeepSeek-V2.5-1210-FP8",
+            CompilationConfig(),
+            OptimizationLevel.O1,
             marks=requires_gpu,
         ),
         pytest.param(
-            "RedHatAI/DeepSeek-V2.5-1210-FP8", CompilationConfig(), OptimizationLevel.O2,
+            "RedHatAI/DeepSeek-V2.5-1210-FP8",
+            CompilationConfig(),
+            OptimizationLevel.O2,
             marks=requires_gpu,
         ),
         pytest.param(
-            "RedHatAI/DeepSeek-V2.5-1210-FP8", CompilationConfig(), OptimizationLevel.O3,
+            "RedHatAI/DeepSeek-V2.5-1210-FP8",
+            CompilationConfig(),
+            OptimizationLevel.O3,
             marks=requires_gpu,
         ),
     ],
@@ -1163,8 +1326,7 @@ def test_needs_dp_coordination(
     assert vllm_config.needs_dp_coordinator == expected_needs_coordinator
 
 
-@requires_hf_token
-def test_eagle_draft_model_config():
+def test_eagle_draft_model_config(mock_gated_models):
     """Test that EagleDraft model config is correctly set."""
     target_model_config = ModelConfig(
         "meta-llama/Meta-Llama-3-8B-Instruct", trust_remote_code=True
