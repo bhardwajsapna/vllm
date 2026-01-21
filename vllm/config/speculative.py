@@ -48,6 +48,7 @@ SpeculativeMethod = Literal[
     "mlp_speculator",
     "draft_model",
     "suffix",
+    "dflash",
     EagleModelTypes,
 ]
 
@@ -378,6 +379,8 @@ class SpeculativeConfig:
                     self.method = "eagle3"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
                     self.method = "medusa"
+                elif self.draft_model_config.hf_config.model_type == "dflash":
+                    self.method = "dflash"
                 elif self.draft_model_config.hf_config.model_type == "mlp_speculator":
                     self.method = "mlp_speculator"
                 elif self.draft_model_config.hf_config.model_type in get_args(
@@ -698,6 +701,9 @@ class SpeculativeConfig:
 
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "mtp")
+
+    def use_dflash(self) -> bool:
+        return self.method == "dflash"
 
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"

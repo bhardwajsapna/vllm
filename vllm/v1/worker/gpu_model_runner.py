@@ -144,6 +144,7 @@ from vllm.v1.sample.logits_processor.interface import LogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
+from vllm.v1.spec_decode.dflash import DFlashProposer
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
@@ -437,6 +438,7 @@ class GPUModelRunner(
                 | EagleProposer
                 | DraftModelProposer
                 | MedusaProposer
+                | DFlashProposer
             )
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
@@ -456,6 +458,10 @@ class GPUModelRunner(
                     )
             elif self.speculative_config.method == "medusa":
                 self.drafter = MedusaProposer(
+                    vllm_config=self.vllm_config, device=self.device
+                )
+            elif self.speculative_config.use_dflash():
+                self.drafter = DFlashProposer(
                     vllm_config=self.vllm_config, device=self.device
                 )
             else:
