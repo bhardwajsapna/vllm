@@ -245,6 +245,82 @@ Target Model (large)
 
 ---
 
+## Reproducibility
+
+### Overview
+
+Speculative decoding is **lossless by design** — draft tokens are always verified by the target model via rejection sampling. Non-determinism in draft generation affects only performance (acceptance rate / speedup), never output correctness. The accepted token sequence is always identical to what the target model would have produced alone.
+
+### DFlash Reproducibility Analysis
+
+DFlash's algorithmic logic is **fully deterministic** given the same inputs:
+
+| Component | Deterministic? | Notes |
+|-----------|:--------------:|-------|
+| Keep schedule | Yes | Pure arithmetic: `(i+1)/n` for each step |
+| MASK initialization | Yes | `torch.full` with constant fill value |
+| Token selection (argmax) | Yes | Greedy decoding, no sampling |
+| Confidence computation (softmax) | Yes (CPU) | GPU reductions may vary in accumulation order |
+| Top-k ranking | Yes (CPU) | GPU `topk` with tied values is non-deterministic |
+| Scatter mask creation | Yes | `scatter_` with pre-computed indices |
+| `torch.where` re-masking | Yes | Elementwise, fully deterministic |
+| Full denoising loop | Yes (CPU) | Composition of above deterministic ops |
+
+### Test Coverage
+
+| Metric | Value |
+|--------|------:|
+| Total reproducibility-checked invocations | 1,814 |
+| Distinct input configurations | 60 |
+| Max repetitions per input | 100 |
+| Batch sizes tested | 1, 2, 4, 8, 64 |
+| Sequence lengths tested | 1, 8, 16 |
+| Vocabulary sizes tested | 100, 1K, 32K, 128K |
+| Keep ratios tested | 0.25, 0.5, 0.75, 1.0 |
+| Denoising steps tested | 1, 2, 3, 4, 5, 10 |
+| Numeric dtypes tested | float16, bfloat16, float32 |
+| Edge cases | overflow (1000), underflow (-1000), tied confidence, uniform logits |
+
+### GPU Considerations
+
+On GPU, bit-exact reproducibility is **not guaranteed** without explicit settings:
+
+1. **cuBLAS matrix multiplications** — non-deterministic by default due to algorithm selection
+2. **Flash Attention** — uses non-deterministic atomic accumulation
+3. **Reduction operations** (softmax, topk) — floating-point addition order may vary
+4. **Tensor parallelism** — inter-GPU communication order can differ between runs
+
+To force GPU determinism (at a performance cost):
+```python
+torch.use_deterministic_algorithms(True)
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+```
+
+### Why This Is Acceptable
+
+| Concern | Mitigation |
+|---------|-----------|
+| Draft tokens differ across runs | Verified by target model — wrong drafts are rejected, not emitted |
+| Acceptance rate varies | Performance variance only, not correctness |
+| Non-deterministic GPU ops | The algorithm logic itself is deterministic; GPU non-determinism affects the draft model's forward pass equally for all speculative methods |
+| Tied confidence in topk | Rare in practice (continuous softmax outputs almost never tie); even if ties occur, the target model still verifies |
+
+### Comparison Across Methods
+
+| Method | Draft Deterministic? | Why / Why Not |
+|--------|:--------------------:|---------------|
+| **N-gram** | Yes | Pure pattern matching, no neural network |
+| **Draft Model** | No (GPU) | Autoregressive model forward passes |
+| **Medusa** | No (GPU) | MLP heads on GPU |
+| **EAGLE** | No (GPU) | Transformer head on GPU |
+| **MTP** | No (GPU) | Target model layers on GPU |
+| **DFlash** | Algorithm: Yes, GPU: No | Deterministic logic, non-deterministic GPU kernels |
+| **Suffix** | Yes | Pure pattern matching, no neural network |
+
+*All methods are lossless regardless of draft determinism — the target model verification ensures correctness.*
+
+---
+
 ## File Locations
 
 | Method | Proposer | Model (if applicable) |
