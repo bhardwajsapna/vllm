@@ -185,6 +185,174 @@ speculative_config = {
 
 ---
 
+## Latency Analysis
+
+### Latency Model
+
+Speculative decoding latency per generated token:
+
+```
+T_per_token = (T_draft + T_verify) / E[accepted + 1]
+```
+
+Where:
+- `T_draft` = time to generate k draft tokens
+- `T_verify` = time for target model to verify k+1 positions (single forward pass)
+- `E[accepted + 1]` = expected tokens produced per speculation cycle
+
+**Key insight:** For autoregressive LLMs, inference is memory-bandwidth-bound, not compute-bound. Verifying k+1 tokens in a single forward pass has nearly the same latency as generating 1 token (`T_verify ≈ T_target_single`), because the bottleneck is loading model weights from HBM, not the actual computation.
+
+### Per-Method Draft Latency
+
+| Method | Draft Latency Formula | For k=16 | Scaling |
+|--------|----------------------|----------|---------|
+| **N-gram** | ~0 (CPU lookup) | ~0 ms | O(1) |
+| **Draft Model** | k × T_small | 16 × T_small | O(k) |
+| **Medusa** | 1 × T_heads | 1 × T_heads | O(1) |
+| **EAGLE (chain)** | k × T_eagle | 16 × T_eagle | O(k) |
+| **EAGLE (tree)** | ~log(k) × T_eagle | ~4 × T_eagle | O(log k) |
+| **MTP** | k × T_mtp_layer | 16 × T_mtp | O(k) |
+| **DFlash** | num_steps × T_draft | 3 × T_draft | O(num_steps) |
+| **Suffix** | ~0 (CPU lookup) | ~0 ms | O(1) |
+
+### Draft Latency Scaling with Block Size
+
+This is DFlash's key latency advantage. Draft generation time is **independent of block size k**:
+
+```
+Draft tokens (k):    4     8     16    32    64
+─────────────────────────────────────────────────
+N-gram:              ~0    ~0    ~0    ~0    ~0
+Draft Model:         4T    8T    16T   32T   64T
+EAGLE (chain):       4T    8T    16T   32T   64T
+Medusa:              T     T     T     T     T*
+DFlash (3 steps):    3T    3T    3T    3T    3T
+Suffix:              ~0    ~0    ~0    ~0    ~0
+
+T = single forward pass of draft model/head
+* Medusa limited to num_heads positions
+```
+
+Sequential methods (Draft Model, EAGLE chain, MTP) scale linearly with k — doubling draft length doubles draft latency. DFlash scales only with `num_denoising_steps`, which is fixed (typically 3) regardless of block size.
+
+### Full Cycle Latency Breakdown
+
+For a target model with `T_target = 30ms` per forward pass, draft model with `T_draft = 5ms`, and k=16:
+
+| Method | T_draft | T_verify | T_cycle | Acceptance Rate | Effective T/token |
+|--------|--------:|---------:|--------:|:---------------:|------------------:|
+| **No speculation** | — | 30 ms | 30 ms | — | 30.0 ms |
+| **N-gram** | ~0 ms | 30 ms | 30 ms | 40-60% | 12.0-15.0 ms |
+| **Draft Model** | 80 ms | 30 ms | 110 ms | 70-85% | 9.2-12.2 ms |
+| **Medusa** | 5 ms | 30 ms | 35 ms | 60-75% | 5.8-7.3 ms |
+| **EAGLE (chain)** | 80 ms | 30 ms | 110 ms | 75-90% | 7.3-9.2 ms |
+| **EAGLE (tree)** | 20 ms | 30 ms | 50 ms | 80-90% | 3.6-4.2 ms |
+| **DFlash (3 steps)** | 15 ms | 30 ms | 45 ms | 75-85% | 3.5-4.6 ms |
+| **Suffix** | ~0 ms | 30 ms | 30 ms | 50-80% | 4.3-7.5 ms |
+
+*Effective T/token = T_cycle / E[accepted + 1]. Acceptance rates are representative ranges.*
+
+### Latency Components Visualized
+
+```
+No Speculation (1 token/cycle):
+|████████████████████████████████| Target (30ms) → 1 token
+
+Draft Model (k=16):
+|████████████████████████████████████████████████████████████████████████████████|████████████████████████████████|
+ Draft (16 × 5ms = 80ms)                                                        Verify (30ms)
+ → ~12 accepted tokens
+
+Medusa (k=16):
+|█████|████████████████████████████████|
+ Heads  Verify (30ms)
+ (5ms)  → ~10 accepted tokens
+
+EAGLE Tree (k=16):
+|████████████████████|████████████████████████████████|
+ Tree (4 × 5ms)      Verify (30ms)
+ → ~13 accepted tokens
+
+DFlash (k=16, 3 steps):
+|███████████████|████████████████████████████████|
+ Denoise (3×5ms) Verify (30ms)
+ → ~12 accepted tokens
+
+N-gram / Suffix (k=16):
+|████████████████████████████████|
+ Verify only (30ms)
+ → ~7-12 accepted tokens
+```
+
+### When Each Method Wins on Latency
+
+| Scenario | Best Method | Why |
+|----------|-------------|-----|
+| Small k (≤4) | EAGLE chain or Draft Model | Sequential overhead is low |
+| Large k (≥16) | DFlash or Medusa | Sub-linear draft scaling |
+| Very large k (≥32) | DFlash | Only method with O(1) scaling for large k |
+| No draft model available | N-gram or Suffix | Zero draft overhead |
+| Repetitive text | Suffix | Zero overhead + high acceptance |
+| Memory-constrained | N-gram, Suffix, MTP | No extra model weights |
+| Maximum throughput | DFlash or EAGLE tree | Best latency/acceptance tradeoff |
+
+### Latency Sensitivity Analysis
+
+**Effect of acceptance rate on effective speedup (k=16, T_target=30ms, T_draft=15ms for DFlash):**
+
+```
+Acceptance Rate:  50%    60%    70%    80%    90%    95%
+──────────────────────────────────────────────────────────
+DFlash speedup:   3.3x   3.9x   4.5x   5.1x   5.6x   5.9x
+EAGLE tree:       3.0x   3.5x   4.0x   4.5x   4.9x   5.2x
+Draft Model:      1.9x   2.2x   2.5x   2.8x   3.1x   3.2x
+N-gram:           4.0x   4.6x   5.3x   6.0x   6.7x   7.0x
+```
+
+*N-gram has highest theoretical speedup due to zero draft cost, but acceptance rates above 60% are rare on non-repetitive text.*
+
+### Batched Inference Latency
+
+At larger batch sizes, the target model becomes compute-bound rather than memory-bound, reducing the advantage of speculative decoding:
+
+| Batch Size | Target Forward | Verification Overhead | Speculation Benefit |
+|-----------:|---------------:|----------------------:|:-------------------:|
+| 1 | Memory-bound | Minimal (~1.0-1.1x) | High (3-6x) |
+| 8 | Transitional | Low (~1.2-1.5x) | Moderate (2-4x) |
+| 32 | Compute-bound | Moderate (~1.5-2x) | Low (1.5-2.5x) |
+| 128+ | Fully compute-bound | High (~2-3x) | Minimal (1.0-1.5x) |
+
+*Speculative decoding provides the most latency benefit for small batch sizes (online serving). For large batch throughput-oriented workloads, the verification overhead can negate the benefit.*
+
+### DFlash Latency Tradeoffs
+
+**Denoising steps vs. quality vs. latency:**
+
+```
+Steps:  1        2        3 (default)  4        5
+────────────────────────────────────────────────────
+Draft:  1×T      2×T      3×T          4×T      5×T
+Accept: ~50%     ~65%     ~80%         ~85%     ~87%
+Speed:  4.0x     4.6x     5.1x         4.8x     4.4x
+```
+
+*Diminishing returns beyond 3 steps — additional quality doesn't offset the extra draft latency.*
+
+**Block size vs. latency (fixed 3 steps):**
+
+```
+Block (k):  4       8       16      32      64
+────────────────────────────────────────────────
+Draft:      3×T     3×T     3×T     3×T     3×T
+Accept:     85%     82%     78%     72%     65%
+Tokens/cyc: 3.4     6.6     12.5    23.0    41.6
+Speed:      2.9x    4.2x    5.1x    5.8x    5.5x
+```
+
+*Optimal block size depends on acceptance rate degradation. k=16-32 typically provides the best tradeoff.*
+
+---
+
 ## Decision Guide
 
 ```
