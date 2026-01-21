@@ -293,3 +293,145 @@ class TestDFlashReproducibility:
         noise2 = torch.randn(2, 8, 256)
 
         assert not torch.allclose(noise1, noise2)
+
+
+class TestDFlashStats:
+    """Tests for DFlash statistics tracking."""
+
+    def test_stats_initialization(self):
+        """Test that stats are initialized correctly."""
+        from vllm.model_executor.models.dflash import DFlashStats
+
+        stats = DFlashStats()
+        assert stats.total_calls == 0
+        assert stats.total_input_tokens == 0
+        assert stats.seeded_calls == 0
+        assert stats.unseeded_calls == 0
+
+    def test_record_call(self):
+        """Test recording a single call."""
+        from vllm.model_executor.models.dflash import DFlashStats
+
+        stats = DFlashStats()
+        stats.record_call(
+            batch_size=4,
+            num_input_tokens=100,
+            num_draft_tokens=32,
+            elapsed_ms=10.5,
+            seed=42,
+        )
+
+        assert stats.total_calls == 1
+        assert stats.total_input_tokens == 100
+        assert stats.total_draft_tokens_generated == 32
+        assert stats.seeded_calls == 1
+        assert stats.unseeded_calls == 0
+        assert 42 in stats.unique_seeds
+
+    def test_record_multiple_calls(self):
+        """Test recording multiple calls."""
+        from vllm.model_executor.models.dflash import DFlashStats
+
+        stats = DFlashStats()
+
+        # First call - seeded
+        stats.record_call(
+            batch_size=2,
+            num_input_tokens=50,
+            num_draft_tokens=16,
+            elapsed_ms=5.0,
+            seed=42,
+        )
+
+        # Second call - unseeded
+        stats.record_call(
+            batch_size=4,
+            num_input_tokens=100,
+            num_draft_tokens=32,
+            elapsed_ms=8.0,
+            seed=None,
+        )
+
+        # Third call - different seed
+        stats.record_call(
+            batch_size=3,
+            num_input_tokens=75,
+            num_draft_tokens=24,
+            elapsed_ms=6.0,
+            seed=123,
+        )
+
+        assert stats.total_calls == 3
+        assert stats.total_input_tokens == 225
+        assert stats.total_draft_tokens_generated == 72
+        assert stats.seeded_calls == 2
+        assert stats.unseeded_calls == 1
+        assert len(stats.unique_seeds) == 2
+        assert stats.min_batch_size == 2
+        assert stats.max_batch_size == 4
+
+    def test_get_summary(self):
+        """Test getting statistics summary."""
+        from vllm.model_executor.models.dflash import DFlashStats
+
+        stats = DFlashStats()
+        stats.record_call(
+            batch_size=4,
+            num_input_tokens=100,
+            num_draft_tokens=32,
+            elapsed_ms=10.0,
+            seed=42,
+        )
+
+        summary = stats.get_summary()
+        assert summary["total_calls"] == 1
+        assert summary["total_input_tokens"] == 100
+        assert summary["seeded_calls"] == 1
+        assert summary["reproducibility_rate"] == 100.0
+
+    def test_reset(self):
+        """Test resetting statistics."""
+        from vllm.model_executor.models.dflash import DFlashStats
+
+        stats = DFlashStats()
+        stats.record_call(
+            batch_size=4,
+            num_input_tokens=100,
+            num_draft_tokens=32,
+            elapsed_ms=10.0,
+            seed=42,
+        )
+
+        stats.reset()
+        assert stats.total_calls == 0
+        assert stats.total_input_tokens == 0
+        assert len(stats.unique_seeds) == 0
+
+    def test_global_stats(self):
+        """Test global statistics functions."""
+        from vllm.model_executor.models.dflash import (
+            get_dflash_stats,
+            reset_dflash_stats,
+        )
+
+        reset_dflash_stats()
+        stats = get_dflash_stats()
+        assert stats.total_calls == 0
+
+    def test_stats_string_representation(self):
+        """Test string representation of stats."""
+        from vllm.model_executor.models.dflash import DFlashStats
+
+        stats = DFlashStats()
+        stats.record_call(
+            batch_size=4,
+            num_input_tokens=100,
+            num_draft_tokens=32,
+            elapsed_ms=10.0,
+            seed=42,
+        )
+
+        stats_str = str(stats)
+        assert "DFlash Statistics" in stats_str
+        assert "Calls: 1" in stats_str
+        assert "Input tokens: 100" in stats_str
