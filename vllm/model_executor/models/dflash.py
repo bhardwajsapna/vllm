@@ -386,11 +386,14 @@ class DFlashModel(nn.Module):
     def generate_draft_tokens(
         self,
         context_hidden_states: torch.Tensor,
+        seed: int | None = None,
     ) -> torch.Tensor:
         """Generate draft tokens using iterative denoising.
 
         Args:
             context_hidden_states: Hidden states from target model [batch_size, hidden_size]
+            seed: Optional random seed for reproducibility. If provided, the same
+                  seed with the same inputs will produce identical draft tokens.
 
         Returns:
             draft_token_ids: [batch_size, block_size]
@@ -399,10 +402,17 @@ class DFlashModel(nn.Module):
         device = context_hidden_states.device
         dtype = context_hidden_states.dtype
 
+        # Set seed for reproducibility if provided
+        generator = None
+        if seed is not None:
+            generator = torch.Generator(device=device)
+            generator.manual_seed(seed)
+
         # Start with random noise
         x_t = torch.randn(
             batch_size, self.block_size, self.hidden_size,
-            device=device, dtype=dtype
+            device=device, dtype=dtype,
+            generator=generator,
         )
 
         # Iterative denoising
@@ -423,7 +433,10 @@ class DFlashModel(nn.Module):
 
                 # DDPM sampling step
                 # x_{t-1} = sqrt(alpha_bar_{t-1}) * x_0 + sqrt(1 - alpha_bar_{t-1}) * noise
-                noise = torch.randn_like(x_t)
+                noise = torch.randn(
+                    x_t.shape, device=device, dtype=dtype,
+                    generator=generator,
+                )
                 x_t = sqrt_alpha_bar_t_prev * predicted_x0 + \
                       sqrt_one_minus_alpha_bar_t_prev * noise
             else:

@@ -232,3 +232,64 @@ class TestDFlashConfigExport:
         from vllm.transformers_utils import configs
 
         assert "DFlashConfig" in configs.__all__
+
+
+class TestDFlashReproducibility:
+    """Tests for DFlash reproducibility."""
+
+    def test_noise_schedule_reproducibility(self):
+        """Test that noise schedules are deterministic."""
+        from vllm.model_executor.models.dflash import DFlashNoiseSchedule
+
+        schedule1 = DFlashNoiseSchedule(num_steps=8, schedule_type="cosine")
+        schedule2 = DFlashNoiseSchedule(num_steps=8, schedule_type="cosine")
+
+        assert torch.allclose(schedule1.alpha_bar, schedule2.alpha_bar)
+        assert torch.allclose(schedule1.sqrt_alpha_bar, schedule2.sqrt_alpha_bar)
+
+    def test_noise_schedule_all_types_reproducible(self):
+        """Test all noise schedule types are reproducible."""
+        from vllm.model_executor.models.dflash import DFlashNoiseSchedule
+
+        for schedule_type in ["cosine", "linear", "sqrt"]:
+            s1 = DFlashNoiseSchedule(num_steps=8, schedule_type=schedule_type)
+            s2 = DFlashNoiseSchedule(num_steps=8, schedule_type=schedule_type)
+            assert torch.allclose(s1.alpha_bar, s2.alpha_bar), \
+                f"{schedule_type} schedule not reproducible"
+
+    def test_config_reproducibility(self):
+        """Test that configs with same parameters are equal."""
+        config1 = DFlashConfig(
+            hidden_size=4096,
+            block_size=8,
+            num_diffusion_steps=8,
+        )
+        config2 = DFlashConfig(
+            hidden_size=4096,
+            block_size=8,
+            num_diffusion_steps=8,
+        )
+
+        assert config1.hidden_size == config2.hidden_size
+        assert config1.block_size == config2.block_size
+        assert config1.num_diffusion_steps == config2.num_diffusion_steps
+
+    def test_random_seed_produces_same_noise(self):
+        """Test that same random seed produces identical noise."""
+        torch.manual_seed(42)
+        noise1 = torch.randn(2, 8, 256)
+
+        torch.manual_seed(42)
+        noise2 = torch.randn(2, 8, 256)
+
+        assert torch.allclose(noise1, noise2)
+
+    def test_different_seeds_produce_different_noise(self):
+        """Test that different seeds produce different noise."""
+        torch.manual_seed(42)
+        noise1 = torch.randn(2, 8, 256)
+
+        torch.manual_seed(43)
+        noise2 = torch.randn(2, 8, 256)
+
+        assert not torch.allclose(noise1, noise2)
