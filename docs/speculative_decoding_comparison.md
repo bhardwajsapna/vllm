@@ -437,6 +437,120 @@ output = llm.generate("Your prompt here")
 
 ---
 
+## Latency Analysis
+
+### Theoretical Latency Breakdown
+
+The latency of speculative decoding methods can be analyzed across several components:
+
+| Method | Draft Generation | Verification | Memory Access | Total Overhead |
+|--------|------------------|--------------|---------------|----------------|
+| **N-gram** | ~0.1ms (CPU) | 1x target | Minimal | Very Low |
+| **Medusa** | ~1-2ms | 1x target | Low | Low |
+| **EAGLE** | ~3-5ms | 1x target (tree) | Medium | Medium |
+| **EAGLE3** | ~3-5ms | 1x target (tree) | Medium | Medium |
+| **MTP** | ~0.5ms | Integrated | Low | Very Low |
+| **MLP Speculator** | ~0.5-1ms | 1x target (tree) | Minimal | Very Low |
+| **Suffix** | ~1-3ms (tree lookup) | 1x target | Variable (cache) | Low-Medium |
+| **DFlash** | ~5-15ms (diffusion) | 1x target | Medium | Medium-High |
+| **Draft Model** | ~10-50ms | 1x target | High | High |
+
+### Latency vs. Acceptance Rate Trade-offs
+
+```
+High Acceptance ─┐
+                 │   ★ EAGLE3
+                 │ ★ EAGLE
+                 │   ★ Medusa
+                 │     ★ DFlash (tuned)
+                 │   ★ MTP
+                 │     ★ Draft Model
+                 │   ★ MLP Speculator
+                 │     ★ Suffix (warm)
+Low Acceptance  ─┤ ★ N-gram
+                 │   ★ Suffix (cold)
+                 └────────────────────────
+                 Low              High
+                      Latency
+```
+
+### Speedup Factors
+
+| Method | Typical Speedup | Best Case | Conditions |
+|--------|----------------|-----------|------------|
+| **N-gram** | 1.2-1.5x | 2x | Repetitive prompts |
+| **Medusa** | 2-3x | 3.5x | General workloads |
+| **EAGLE** | 2.5-3.5x | 4x | Long sequences |
+| **EAGLE3** | 3-4x | 5x | Long sequences |
+| **MTP** | 2-2.5x | 3x | Native support |
+| **MLP Speculator** | 1.5-2x | 2.5x | Low memory |
+| **Suffix** | 1.5-3x | 4x | Warm cache, repeated queries |
+| **DFlash** | 1.5-2.5x* | 3x* | Parallel generation |
+| **Draft Model** | 1.5-2x | 2.5x | Matching vocab |
+
+*DFlash speedup is experimental and depends on tuning parameters.
+
+### DFlash Latency Tuning
+
+DFlash offers several knobs to trade latency for quality:
+
+| Parameter | Range | Effect on Latency | Effect on Quality |
+|-----------|-------|-------------------|-------------------|
+| `num_diffusion_steps` | 1-16 | Linear increase | Higher = better |
+| `block_size` | 4-16 | Minimal impact | Larger = more drafts |
+| `noise_schedule` | cosine/linear/sqrt | Negligible | cosine usually best |
+
+**Recommended configurations:**
+
+```python
+# Low latency (faster, lower acceptance)
+speculative_config = {
+    "method": "dflash",
+    "num_speculative_tokens": 4,
+    "dflash_num_diffusion_steps": 4,
+}
+
+# Balanced (default)
+speculative_config = {
+    "method": "dflash",
+    "num_speculative_tokens": 8,
+    "dflash_num_diffusion_steps": 8,
+}
+
+# High quality (slower, higher acceptance)
+speculative_config = {
+    "method": "dflash",
+    "num_speculative_tokens": 12,
+    "dflash_num_diffusion_steps": 12,
+}
+```
+
+### Memory-Latency Trade-offs
+
+| Method | GPU Memory | CPU Memory | Memory Impact on Latency |
+|--------|------------|------------|-------------------------|
+| **N-gram** | 0 | <1MB | None |
+| **Medusa** | ~100-500MB | Minimal | Minor |
+| **EAGLE** | ~1-3GB | Minimal | Moderate |
+| **MTP** | 0 (shared) | Minimal | None |
+| **MLP Speculator** | ~50-200MB | Minimal | None |
+| **Suffix** | 0 | 100MB-1GB | Cache size affects lookup |
+| **DFlash** | ~500MB-2GB | Minimal | Moderate |
+| **Draft Model** | 2-14GB | Minimal | High (memory bandwidth) |
+
+### Batch Size Effects
+
+| Method | Batch=1 | Batch=8 | Batch=32 | Batch Scaling |
+|--------|---------|---------|----------|---------------|
+| **N-gram** | Best | Good | Fair | Linear decay |
+| **Medusa** | Best | Good | Good | Sublinear |
+| **EAGLE** | Best | Good | Good | Sublinear |
+| **MTP** | Best | Best | Good | Efficient |
+| **DFlash** | Good | Best | Good | Parallel gains |
+| **Draft Model** | Good | Fair | Poor | Poor scaling |
+
+---
+
 ## References
 
 - [Medusa Paper](https://arxiv.org/abs/2401.10774)
